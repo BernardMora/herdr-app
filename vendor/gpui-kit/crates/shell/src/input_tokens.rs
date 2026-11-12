@@ -310,6 +310,7 @@ state_binding!(TextareaState, invoke_textarea, textarea_token_state_methods);
 /// the selection. Editors have no inline tokens.
 pub(crate) const EDITOR_METHODS: &[(&str, bool)] = &[
     ("selected_range", true),
+    ("cursor_bounds", true),
     ("set_selected_range", false),
     ("replace", false),
 ];
@@ -334,6 +335,29 @@ pub(crate) fn invoke_editor(
             let text = string(text)?;
             entity.update(cx, |state, cx| state.replace(text, window, cx));
             Ok(Data::Null)
+        }
+        // HERDR: where the caret was last drawn, in window pixels, so a script
+        // can anchor a popup (a completion list) to it. Null before the first frame.
+        ("cursor_bounds", []) => {
+            let state = entity.read(cx);
+            Ok(match state.prepaint_caret_geometry() {
+                Some(caret) => {
+                    let bounds = caret.cursor_bounds();
+                    // The caret is laid out in window space before scrolling.
+                    let at = bounds.origin + caret.scroll_offset();
+                    let local = at - caret.input_bounds().origin;
+                    let number = |value: gpui::Pixels| Data::Number(f32::from(value) as f64);
+                    object([
+                        ("x", number(at.x)),
+                        ("y", number(at.y)),
+                        ("local_x", number(local.x)),
+                        ("local_y", number(local.y)),
+                        ("width", number(bounds.size.width)),
+                        ("height", number(caret.line_height())),
+                    ])
+                }
+                None => Data::Null,
+            })
         }
         _ => bail!("invalid arguments for editor state operation `{name}`"),
     }

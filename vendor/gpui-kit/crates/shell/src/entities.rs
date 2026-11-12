@@ -199,6 +199,8 @@ pub(crate) struct EditorOptions {
     pub live_preview: bool,
     /// HERDR: the font live preview draws code in; the theme's mono font when unset.
     pub code_font_family: Option<String>,
+    /// HERDR: an icon font for live preview's task checkboxes.
+    pub symbol_font_family: Option<String>,
 }
 
 impl Default for EditorOptions {
@@ -215,6 +217,7 @@ impl Default for EditorOptions {
             font_size: None,
             live_preview: false,
             code_font_family: None,
+            symbol_font_family: None,
         }
     }
 }
@@ -480,7 +483,9 @@ impl EntityStore {
                 || gpui_base::Theme::global(cx).tokens.typography.mono.clone(),
                 Into::into,
             );
-            crate::markdown_live::MarkdownTheme::from_colors(colors, mono)
+            let mut theme = crate::markdown_live::MarkdownTheme::from_colors(colors, mono);
+            theme.symbols = options.symbol_font_family.clone().map(Into::into);
+            theme
         });
         let language = if live_preview.is_some() {
             String::new()

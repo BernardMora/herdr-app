@@ -30,6 +30,8 @@ pub(crate) struct MarkdownTheme {
     pub muted: Hsla,
     pub checkbox: Hsla,
     pub mono: SharedString,
+    /// An icon font with Font Awesome's square glyphs, for task checkboxes.
+    pub symbols: Option<SharedString>,
     /// Font size multipliers for heading levels 1 to 6.
     pub heading_scale: [f32; 6],
 }
@@ -60,6 +62,7 @@ impl MarkdownTheme {
             muted: pick("muted", 0x7f848e),
             checkbox: pick("checkbox", 0x61afef),
             mono,
+            symbols: None,
             heading_scale: [1.6, 1.4, 1.25, 1.12, 1.05, 1.0],
         }
     }
@@ -75,11 +78,69 @@ enum Block {
     Code,
     /// YAML front matter, including its `---` lines.
     Front,
+    /// A row of a pipe table; `sig` changes when the table's column widths do.
+    Table { sig: u64, header: bool },
+    /// The `| --- | --- |` row under a table's header.
+    TableRule { sig: u64 },
+}
+
+/// One pipe table: its rows and the width of each column, in characters of
+/// what the cells show (markers hidden).
+#[derive(Clone, Debug, PartialEq)]
+struct Table {
+    rows: Range<usize>,
+    widths: Vec<usize>,
+}
+
+/// The cells of a table row: the byte range of each one's trimmed content.
+fn table_cells(line: &str) -> Vec<Range<usize>> {
+    let bytes = line.as_bytes();
+    let mut cells = Vec::new();
+    let mut i = line.len() - line.trim_start().len();
+    if bytes.get(i) == Some(&b'|') {
+        i += 1;
+    }
+    let mut start = i;
+    let mut code = false;
+    while i <= bytes.len() {
+        let at_end = i == bytes.len();
+        let b = if at_end { b'|' } else { bytes[i] };
+        match b {
+            b'\\' if !at_end => {
+                i += 2;
+                continue;
+            }
+            b'`' if !at_end => code = !code,
+            b'|' if !code || at_end => {
+                let raw = &line[start..i.min(line.len())];
+                let lead = raw.len() - raw.trim_start().len();
+                let content = start + lead..start + raw.trim_end().len().max(lead);
+                // The text after the last pipe is not a cell when it is empty.
+                if !(at_end && raw.trim().is_empty()) {
+                    cells.push(content);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    cells
+}
+
+fn is_table_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains('-')
+        && trimmed.contains('|')
+        && trimmed
+            .bytes()
+            .all(|b| matches!(b, b'|' | b'-' | b':' | b' '))
 }
 
 pub(crate) struct MarkdownPresenter {
     theme: MarkdownTheme,
     blocks: Vec<Block>,
+    tables: Vec<Table>,
 }
 
 impl MarkdownPresenter {
@@ -87,7 +148,154 @@ impl MarkdownPresenter {
         Self {
             theme,
             blocks: Vec::new(),
+            tables: Vec::new(),
         }
+    }
+
+    fn table_at(&self, row: usize) -> Option<&Table> {
+        let ix = self.tables.partition_point(|table| table.rows.end <= row);
+        self.tables.get(ix).filter(|table| table.rows.contains(&row))
+    }
+
+    /// Find pipe tables among the normal lines and measure their columns.
+    fn scan_tables(&mut self, text: &str) {
+        self.tables.clear();
+        let lines: Vec<&str> = text
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .collect();
+        let is_row = |blocks: &[Block], row: usize| {
+            blocks.get(row) == Some(&Block::Normal)
+                && lines.get(row).is_some_and(|l| l.trim_start().starts_with('|'))
+        };
+        let mut row = 0;
+        while row + 1 < lines.len() {
+            if !(is_row(&self.blocks, row)
+                && is_row(&self.blocks, row + 1)
+                && is_table_rule(lines[row + 1]))
+            {
+                row += 1;
+                continue;
+            }
+            let mut end = row + 2;
+            while is_row(&self.blocks, end) {
+                end += 1;
+            }
+            let plain = Parser {
+                theme: &self.theme,
+                reveal: None,
+            };
+            let mut widths: Vec<usize> = Vec::new();
+            for (ix, line) in lines[row..end].iter().enumerate() {
+                if ix == 1 {
+                    continue;
+                }
+                for (col, cell) in table_cells(line).into_iter().enumerate() {
+                    let mut spans = Vec::new();
+                    plain.inline(line, cell.clone(), &SpanStyle::default(), &mut spans);
+                    let shown = LinePresentation {
+                        spans,
+                        ..Default::default()
+                    }
+                    .visible_text(line, cell, &gpui::font(""))
+                    .0
+                    .chars()
+                    .count();
+                    if widths.len() <= col {
+                        widths.resize(col + 1, 0);
+                    }
+                    widths[col] = widths[col].max(shown);
+                }
+            }
+            let sig = widths
+                .iter()
+                .fold(0xcbf29ce484222325u64, |hash, width| {
+                    (hash ^ *width as u64).wrapping_mul(0x100000001b3)
+                });
+            for (ix, block) in self.blocks[row..end].iter_mut().enumerate() {
+                *block = if ix == 1 {
+                    Block::TableRule { sig }
+                } else {
+                    Block::Table { sig, header: ix == 0 }
+                };
+            }
+            self.tables.push(Table {
+                rows: row..end,
+                widths,
+            });
+            row = end;
+        }
+    }
+
+    /// A table row drawn as aligned columns: pipes become gutters and each
+    /// cell is padded to its column's width, in the code font so they line up.
+    fn table_row(
+        &self,
+        table: &Table,
+        line: &str,
+        header: bool,
+        reveal: Option<Range<usize>>,
+    ) -> LinePresentation {
+        let theme = &self.theme;
+        let parser = Parser { theme, reveal };
+        let mono = SpanStyle {
+            font_family: Some(theme.mono.clone()),
+            bold: header,
+            ..Default::default()
+        };
+        let gap = SpanStyle {
+            font_family: Some(theme.mono.clone()),
+            ..Default::default()
+        };
+        let mut out = LinePresentation::default();
+        let cells = table_cells(line);
+        let mut at = 0;
+        for (col, cell) in cells.iter().enumerate() {
+            // Everything since the previous cell: its padding, the pipe, a space.
+            if at < cell.start {
+                let pad = if col == 0 {
+                    String::new()
+                } else {
+                    " ".repeat(self.pad(table, line, &cells, col - 1, &parser) + 3)
+                };
+                out.spans
+                    .push(PresentationSpan::replace(at..cell.start, pad, gap.clone()));
+            }
+            if cell.is_empty() {
+                at = cell.end;
+                continue;
+            }
+            parser.inline(line, cell.clone(), &mono, &mut out.spans);
+            at = cell.end;
+        }
+        if at < line.len() {
+            out.spans
+                .push(PresentationSpan::replace(at..line.len(), "", gap));
+        }
+        out
+    }
+
+    /// How many spaces fill cell `col` of `line` out to its column's width.
+    fn pad(
+        &self,
+        table: &Table,
+        line: &str,
+        cells: &[Range<usize>],
+        col: usize,
+        parser: &Parser<'_>,
+    ) -> usize {
+        let cell = cells[col].clone();
+        let mut spans = Vec::new();
+        parser.inline(line, cell.clone(), &SpanStyle::default(), &mut spans);
+        let shown = LinePresentation {
+            spans,
+            ..Default::default()
+        }
+        .visible_text(line, cell, &gpui::font(""))
+        .0
+        .chars()
+        .count();
+        table.widths.get(col).copied().unwrap_or(0).saturating_sub(shown)
     }
 }
 
@@ -145,20 +353,22 @@ fn scan_blocks(text: &str) -> Vec<Block> {
 
 impl LinePresenter for MarkdownPresenter {
     fn sync(&mut self, text: &Rope, edit: Option<PresenterEdit>) -> Vec<usize> {
-        let blocks = scan_blocks(&text.to_string());
-        let old = std::mem::replace(&mut self.blocks, blocks);
+        let source = text.to_string();
+        let old = std::mem::replace(&mut self.blocks, scan_blocks(&source));
+        self.scan_tables(&source);
         let Some(edit) = edit else {
             return Vec::new();
         };
         // Rows after the edit moved by its line delta; report the ones whose
         // block changed (a fence opened or closed above them).
         let delta = edit.new_end_row as isize - edit.old_end_row as isize;
-        (edit.new_end_row + 1..self.blocks.len())
-            .filter(|&row| {
-                let before = (row as isize - delta) as usize;
-                old.get(before) != Some(&self.blocks[row])
-            })
-            .collect()
+        let above = (0..edit.start_row.min(self.blocks.len()))
+            .filter(|&row| old.get(row) != Some(&self.blocks[row]));
+        let below = (edit.new_end_row + 1..self.blocks.len()).filter(|&row| {
+            let before = (row as isize - delta) as usize;
+            old.get(before) != Some(&self.blocks[row])
+        });
+        above.chain(below).collect()
     }
 
     fn line(
@@ -188,6 +398,25 @@ impl LinePresenter for MarkdownPresenter {
                 spans: whole(line, mono(theme.code)),
                 background: theme.code_background,
                 ..Default::default()
+            }),
+            Block::Table { header, .. } => {
+                let table = self.table_at(row)?;
+                Some(self.table_row(table, line, header, reveal))
+            }
+            Block::TableRule { .. } => Some(if reveal.is_some() {
+                LinePresentation {
+                    spans: whole(line, mono(theme.marker)),
+                    ..Default::default()
+                }
+            } else {
+                LinePresentation {
+                    spans: whole(line, SpanStyle::default())
+                        .into_iter()
+                        .map(|span| PresentationSpan::hidden(span.range))
+                        .collect(),
+                    rule: Some(theme.rule),
+                    ..Default::default()
+                }
             }),
             Block::Normal => {
                 let presentation = Parser { theme, reveal }.line(line);
@@ -346,11 +575,21 @@ impl Parser<'_> {
                         .push(PresentationSpan::text(element.clone(), dim.clone()));
                 } else {
                     out.spans.push(PresentationSpan::hidden(marker.start..after));
+                    // Font Awesome's square-o and check-square from the icon
+                    // font when there is one; fallback fonts draw the plain
+                    // box characters at uneven sizes.
+                    let glyph = match (&theme.symbols, done) {
+                        (Some(_), false) => "\u{f096}",
+                        (Some(_), true) => "\u{f14a}",
+                        (None, false) => "☐",
+                        (None, true) => "☑",
+                    };
                     out.spans.push(PresentationSpan::replace(
                         after..after + 3,
-                        if done { "☑" } else { "☐" },
+                        glyph,
                         SpanStyle {
                             color: Some(if done { theme.checkbox } else { theme.marker }),
+                            font_family: theme.symbols.clone(),
                             ..Default::default()
                         },
                     ));
@@ -379,16 +618,6 @@ impl Parser<'_> {
                     &mut out.spans,
                 );
             }
-            return out;
-        }
-
-        // Table row: kept as aligned source in the code font.
-        if rest.starts_with('|') {
-            let style = SpanStyle {
-                font_family: Some(theme.mono.clone()),
-                ..Default::default()
-            };
-            self.inline(line, 0..line.len(), &style, &mut out.spans);
             return out;
         }
 
@@ -740,6 +969,14 @@ fn link_parts(rest: &str) -> Option<(usize, usize)> {
 }
 
 #[cfg(test)]
+fn presenter_has_no_tables(text: &str) -> bool {
+    let mut presenter =
+        MarkdownPresenter::new(MarkdownTheme::from_colors(&HashMap::new(), "Mono".into()));
+    presenter.sync(&Rope::from(text), None);
+    presenter.tables.is_empty()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use gpui_base::input::SpanKind;
@@ -866,7 +1103,7 @@ mod tests {
             "- [x] *a* **b** ~~c~~ ==d== [[w|x]] https://x.dev/a.",
             "> [!note] Title with **bold**",
             "***both*** _under_ snake_case_word * loose * ** x",
-            "| a | **b** |",
+            "| a | **b** |\n| - | - |",
             "![alt](img.png) ![[embed.png]] <https://x.dev>",
         ] {
             let spans = spans(text);
@@ -879,6 +1116,39 @@ mod tests {
                 assert!(text.is_char_boundary(span.range.end), "{text}");
             }
         }
+    }
+
+    #[test]
+    fn tables_draw_as_aligned_columns() {
+        let text = "| Name | Qty |\n| --- | ---: |\n| **Apples** | 3 |\n| Kiwi |  |\nafter";
+        let presenter = presenter(text);
+        assert_eq!(presenter.tables.len(), 1);
+        assert_eq!(presenter.tables[0].rows, 0..4);
+        // Widths count what a cell shows: "Apples", not "**Apples**".
+        assert_eq!(presenter.tables[0].widths, vec![6, 3]);
+        assert_eq!(shown(text, 0, None), "Name     Qty");
+        assert_eq!(shown(text, 1, None), "");
+        assert_eq!(shown(text, 2, None), "Apples   3");
+        assert_eq!(shown(text, 3, None), "Kiwi     ");
+        assert_eq!(shown(text, 4, None), "after");
+        // A lone pipe line is not a table.
+        assert!(super::presenter_has_no_tables("| not a table |\nnext"));
+    }
+
+    #[test]
+    fn widening_a_cell_restyles_the_other_rows() {
+        let mut presenter = presenter("| a | b |\n| - | - |\n| c | d |");
+        let changed = presenter.sync(
+            &Rope::from("| a | b |\n| - | - |\n| cccc | d |"),
+            Some(PresenterEdit {
+                start_row: 2,
+                old_end_row: 2,
+                new_end_row: 2,
+            }),
+        );
+        // The header and rule rows above the edit are padded to the new width.
+        assert_eq!(changed, vec![0, 1]);
+        assert_eq!(presenter.tables[0].widths, vec![4, 1]);
     }
 
     #[test]

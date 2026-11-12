@@ -3169,6 +3169,10 @@ const BASE: &str = r#"  /** A row. */
     set_selected_range(range: InputRange): void;
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
+    /** HERDR: where the caret was last drawn (null before the first frame),
+     * to anchor a popup such as a completion list: `x`/`y` in window pixels,
+     * `local_x`/`local_y` from the Editor element's top-left corner. */
+    cursor_bounds(): { x: number; y: number; local_x: number; local_y: number; width: number; height: number } | null;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Moves the keyboard onto the editor. */
     focus(): void;
@@ -3209,6 +3213,10 @@ const BASE: &str = r#"  /** A row. */
       live_preview?: boolean;
       /** HERDR: the font live preview draws code in; the theme's mono font when unset. */
       code_font_family?: string;
+      /** HERDR: an icon font with Font Awesome's square glyphs (Herdr ships
+       * "Symbols Nerd Font") for live preview's task checkboxes; plain box
+       * characters when unset. */
+      symbol_font_family?: string;
     }) => EditorState;
   };
   export const Editor: { new: (state: EditorState) => NativeElement };
