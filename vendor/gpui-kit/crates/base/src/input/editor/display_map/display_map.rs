@@ -250,6 +250,21 @@ impl DisplayMap {
         self.wrap_map.wrapper().presenter().is_some()
     }
 
+    /// HERDR: the editor's row height, for presented pictures. Returns whether rows changed.
+    pub fn set_line_height(&mut self, line_height: Pixels, cx: &mut App) -> bool {
+        let changed = self.wrap_map.set_line_height(line_height, cx);
+        if changed {
+            self.rebuild_fold_projection();
+        }
+        changed
+    }
+
+    /// HERDR: wrap again after the presenter's output changed without an edit.
+    pub fn refresh_presentation(&mut self, cx: &mut App) {
+        self.wrap_map.refresh_presentation(cx);
+        self.rebuild_fold_projection();
+    }
+
     /// HERDR: move the reveal to the caret's row. Returns whether rows wrapped again.
     pub fn set_reveal(&mut self, reveal: Option<(usize, Range<usize>)>, cx: &mut App) -> bool {
         let changed = self.wrap_map.set_reveal(reveal, cx);

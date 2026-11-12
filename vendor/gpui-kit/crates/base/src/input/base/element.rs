@@ -2011,6 +2011,7 @@ impl<M: InputModeKind> TextElement<M> {
         bg_segments: &[(Range<usize>, Hsla)],
         line_byte_offset: usize,
         font_size: Pixels,
+        available: Pixels,
         window: &mut Window,
     ) -> LineLayout {
         use crate::input::display_map::{InlineFragment, InputLine, LineDecor};
@@ -2109,6 +2110,10 @@ impl<M: InputModeKind> TextElement<M> {
                 background: presentation.background,
                 left_bar: presentation.left_bar,
                 rule: presentation.rule,
+                image: presentation
+                    .image
+                    .as_ref()
+                    .map(|image| (image.image.clone(), image.fit(available))),
             }))
     }
 
@@ -2197,6 +2202,7 @@ impl<M: InputModeKind> TextElement<M> {
                     bg_segments,
                     last_layout.visible_line_byte_offsets[vi],
                     font_size,
+                    last_layout.wrap_width.unwrap_or(px(720.)),
                     window,
                 ));
                 run_offset += line_text.len() + 1;
@@ -2728,6 +2734,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         if self.state.read(cx).display_map.has_presenter() {
             self.state.update(cx, |state, cx| {
                 let reveal = state.presentation_reveal(window);
+                state.display_map.set_line_height(window.line_height(), cx);
                 state.display_map.set_reveal(reveal, cx);
             });
         }

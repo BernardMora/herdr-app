@@ -3096,6 +3096,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify();
     }
 
+    /// HERDR: what the presenter draws changed without the text changing
+    /// (a picture finished loading): wrap and draw again.
+    pub fn refresh_line_presentation(&mut self, cx: &mut Context<Self>) {
+        self.display_map.refresh_presentation(cx);
+        cx.notify();
+    }
+
     /// Get byte offset of the cursor.
     ///
     /// The offset is the UTF-8 offset.

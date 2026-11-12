@@ -513,12 +513,11 @@ impl EntityStore {
         state.update(cx, |state, cx| {
             state.set_value(options.value, window, cx);
             if let Some(theme) = live_preview {
-                state.set_line_presenter(
-                    Some(Rc::new(RefCell::new(
-                        crate::markdown_live::MarkdownPresenter::new(theme),
-                    ))),
-                    cx,
-                );
+                let presenter = Rc::new(RefCell::new(
+                    crate::markdown_live::MarkdownPresenter::new(theme),
+                ));
+                crate::markdown_live::register(cx.entity_id(), &presenter);
+                state.set_line_presenter(Some(presenter), cx);
             }
         });
         self.push(Record::Editor {

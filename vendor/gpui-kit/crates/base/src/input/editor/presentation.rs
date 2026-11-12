@@ -113,6 +113,61 @@ impl PresentationSpan {
     }
 }
 
+/// A picture drawn in a line's rows, from the line's left edge. The line takes
+/// as many rows as the picture needs at the width it is shown.
+#[derive(Clone)]
+pub struct LineImage {
+    pub image: std::sync::Arc<gpui::RenderImage>,
+    /// The picture's own size.
+    pub size: gpui::Size<gpui::Pixels>,
+    /// The widest it should be drawn, when the source says so (`|300`).
+    pub max_width: Option<gpui::Pixels>,
+    /// Drawn under the line's own text (its source is showing) rather than in its place.
+    pub below_text: bool,
+}
+
+impl LineImage {
+    /// The size it is drawn at: never wider than `available` or taller than
+    /// a screenful, keeping its proportions.
+    pub fn fit(&self, available: gpui::Pixels) -> gpui::Size<gpui::Pixels> {
+        let (w, h) = (f32::from(self.size.width), f32::from(self.size.height));
+        if w <= 0. || h <= 0. {
+            return gpui::size(px(0.), px(0.));
+        }
+        let limit = self
+            .max_width
+            .map_or(f32::from(available), |max| f32::from(max).min(f32::from(available)))
+            .max(16.);
+        let scale = (limit / w).min(520. / h).min(1.);
+        gpui::size(px((w * scale).round()), px((h * scale).round()))
+    }
+}
+
+impl LineImage {
+    /// How many rows a picture drawn at `shown` covers, with a little air around it.
+    pub fn rows(shown: gpui::Size<gpui::Pixels>, line_height: gpui::Pixels) -> usize {
+        ((f32::from(shown.height) + 8.) / f32::from(line_height)).ceil() as usize
+    }
+}
+
+impl PartialEq for LineImage {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.image, &other.image)
+            && self.size == other.size
+            && self.max_width == other.max_width
+            && self.below_text == other.below_text
+    }
+}
+
+impl std::fmt::Debug for LineImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LineImage")
+            .field("size", &self.size)
+            .field("max_width", &self.max_width)
+            .finish()
+    }
+}
+
 /// How one buffer line is presented.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinePresentation {
@@ -126,6 +181,8 @@ pub struct LinePresentation {
     pub left_bar: Option<Hsla>,
     /// A horizontal rule across the middle of the first row.
     pub rule: Option<Hsla>,
+    /// A picture drawn in the line's rows; the line grows to hold it.
+    pub image: Option<LineImage>,
 }
 
 impl Default for LinePresentation {
@@ -136,6 +193,7 @@ impl Default for LinePresentation {
             background: None,
             left_bar: None,
             rule: None,
+            image: None,
         }
     }
 }
@@ -143,11 +201,26 @@ impl Default for LinePresentation {
 impl LinePresentation {
     /// Whether shaping this line differs from shaping its plain bytes.
     pub fn changes_layout(&self) -> bool {
-        self.scale != 1. || !self.spans.is_empty()
+        self.scale != 1. || !self.spans.is_empty() || self.image.is_some()
     }
 
     pub fn has_decor(&self) -> bool {
-        self.background.is_some() || self.left_bar.is_some() || self.rule.is_some()
+        self.background.is_some()
+            || self.left_bar.is_some()
+            || self.rule.is_some()
+            || self.image.is_some()
+    }
+
+    /// The rows the line takes beyond its text, to hold its picture.
+    pub fn extra_rows(&self, available: gpui::Pixels, line_height: gpui::Pixels) -> usize {
+        let Some(image) = &self.image else {
+            return 0;
+        };
+        if line_height <= px(0.) {
+            return 0;
+        }
+        let rows = LineImage::rows(image.fit(available), line_height);
+        rows.saturating_sub(usize::from(!image.below_text))
     }
 
     /// The line as consecutive pieces covering `range`: the spans, clipped,

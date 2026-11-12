@@ -25,7 +25,8 @@ mod decorations;
 #[path = "editor/presentation.rs"]
 mod presentation;
 pub use presentation::{
-    LinePresentation, LinePresenter, PresentationSpan, PresenterEdit, SpanKind, SpanStyle,
+    LineImage, LinePresentation, LinePresenter, PresentationSpan, PresenterEdit, SpanKind,
+    SpanStyle,
 };
 #[path = "editor/diagnostics.rs"]
 mod diagnostics;

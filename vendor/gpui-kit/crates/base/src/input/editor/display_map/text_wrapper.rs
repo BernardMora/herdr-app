@@ -232,6 +232,8 @@ pub(crate) struct TextWrapper {
     presenter: Option<Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>>,
     /// HERDR: the caret's row and the selection inside it; its markers show as source.
     reveal: Option<(usize, Range<usize>)>,
+    /// HERDR: the row height, to count the rows a presented picture needs.
+    line_height: Pixels,
     _initialized: bool,
 }
 
@@ -248,8 +250,75 @@ impl TextWrapper {
             inline_metrics: Rc::from([]),
             presenter: None,
             reveal: None,
+            line_height: px(0.),
             _initialized: false,
         }
+    }
+
+    /// HERDR: the editor's row height; pictures are counted in rows of it.
+    pub(crate) fn set_line_height(&mut self, line_height: Pixels, cx: &mut App) -> bool {
+        if self.line_height == line_height {
+            return false;
+        }
+        self.line_height = line_height;
+        if self.presenter.is_some() && self._initialized {
+            self.update_all(&self.text.clone(), cx);
+            return true;
+        }
+        false
+    }
+
+    /// HERDR: wrap everything again: what the presenter draws changed without
+    /// the text changing (a picture finished loading).
+    pub(crate) fn refresh_presentation(&mut self, cx: &mut App) {
+        if self.presenter.is_some() && self._initialized {
+            self.update_all(&self.text.clone(), cx);
+        }
+    }
+
+    /// HERDR: rows `rows` (just wrapped) grow by the empty rows their pictures
+    /// need. The text stays on the first row; the rest are blank rows the
+    /// picture is painted over.
+    fn add_picture_rows(&mut self, rows: std::ops::RangeInclusive<usize>) {
+        let Some(presenter) = self.presenter.clone() else {
+            return;
+        };
+        if self.line_height <= px(0.) {
+            return;
+        }
+        let available = self.wrap_width.unwrap_or(px(720.));
+        let mut grown: Vec<(usize, usize)> = Vec::new();
+        for row in rows {
+            if row >= self.lines_count() {
+                break;
+            }
+            let line: String = self.text.slice_line(row).into();
+            let extra = presenter
+                .borrow()
+                .line(row, &line, self.reveal_for(row))
+                .map_or(0, |p| p.extra_rows(available, self.line_height));
+            if extra > 0 {
+                grown.push((row, extra));
+            }
+        }
+        if grown.is_empty() {
+            return;
+        }
+        let mut cursor = self.lines.cursor::<BufferRows>(&());
+        let mut tree = SumTree::new(&());
+        for (row, extra) in grown {
+            tree.append(cursor.slice(&BufferRows(row), Bias::Right), &());
+            if let Some(item) = cursor.item() {
+                let mut item = item.clone();
+                let end = item.len();
+                item.wrapped_lines.extend((0..extra).map(|_| end..end));
+                tree.push(item, &());
+                cursor.next();
+            }
+        }
+        tree.append(cursor.suffix(), &());
+        drop(cursor);
+        self.lines = tree;
     }
 
     /// HERDR: install (or remove) the line presenter and wrap again with it.
@@ -596,6 +665,12 @@ impl TextWrapper {
                     .collect()
             },
         );
+        // HERDR: the rows just wrapped grow to hold their pictures.
+        let first = changed_text.offset_to_point(range.start).row;
+        let last = changed_text
+            .offset_to_point(range.start + new_text.len())
+            .row;
+        self.add_picture_rows(first..=last);
     }
 
     pub(crate) fn adjust_inline_metrics(&mut self, range: &Range<usize>, new_len: usize) {
@@ -914,11 +989,13 @@ pub(crate) struct LineLayout {
 }
 
 /// HERDR: what a presented line paints behind its text.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone)]
 pub(crate) struct LineDecor {
     pub(crate) background: Option<gpui::Hsla>,
     pub(crate) left_bar: Option<gpui::Hsla>,
     pub(crate) rule: Option<gpui::Hsla>,
+    /// A picture and the size it is drawn at.
+    pub(crate) image: Option<(std::sync::Arc<gpui::RenderImage>, Size<Pixels>)>,
 }
 
 impl LineLayout {
@@ -949,9 +1026,24 @@ impl LineLayout {
         width: Pixels,
         window: &mut Window,
     ) {
-        let Some(decor) = self.decor else {
+        let Some(decor) = self.decor.as_ref() else {
             return;
         };
+        if let Some((image, shown)) = &decor.image {
+            // The picture takes the line's last rows: all of them when its
+            // source is hidden, the ones under the text when it is showing.
+            let own = crate::input::LineImage::rows(*shown, line_height);
+            let top = self.wrapped_lines.len().saturating_sub(own) * line_height;
+            let bounds = gpui::Bounds::new(point(pos.x, pos.y + top + px(4.)), *shown);
+            let _ = window.paint_image(
+                bounds,
+                bounds,
+                gpui::Corners::all(px(4.)),
+                image.clone(),
+                0,
+                false,
+            );
+        }
         let rows = self.wrapped_lines.len().max(1);
         let height = rows * line_height;
         if let Some(color) = decor.background {

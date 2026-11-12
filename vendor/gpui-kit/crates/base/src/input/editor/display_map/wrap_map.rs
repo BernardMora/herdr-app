@@ -129,6 +129,14 @@ impl WrapMap {
         self.wrapper.set_presenter(presenter, cx);
     }
 
+    pub(super) fn set_line_height(&mut self, line_height: Pixels, cx: &mut App) -> bool {
+        self.wrapper.set_line_height(line_height, cx)
+    }
+
+    pub(super) fn refresh_presentation(&mut self, cx: &mut App) {
+        self.wrapper.refresh_presentation(cx);
+    }
+
     pub(super) fn set_reveal(
         &mut self,
         reveal: Option<(usize, Range<usize>)>,

@@ -311,6 +311,7 @@ state_binding!(TextareaState, invoke_textarea, textarea_token_state_methods);
 pub(crate) const EDITOR_METHODS: &[(&str, bool)] = &[
     ("selected_range", true),
     ("cursor_bounds", true),
+    ("set_images", false),
     ("set_selected_range", false),
     ("replace", false),
 ];
@@ -334,6 +335,26 @@ pub(crate) fn invoke_editor(
         ("replace", [text]) => {
             let text = string(text)?;
             entity.update(cx, |state, cx| state.replace(text, window, cx));
+            Ok(Data::Null)
+        }
+        // HERDR: the pictures a live-preview editor draws for lines that are
+        // only an embed (`![[shot.png]]`, `![alt](shot.png)`): each target as
+        // the note writes it, and the file to draw.
+        ("set_images", [Data::Array(images)]) => {
+            let Some(presenter) = crate::markdown_live::presenter_of(entity.entity_id()) else {
+                bail!("set_images needs an editor made with live_preview");
+            };
+            let mut sources = Vec::with_capacity(images.len());
+            for image in images {
+                sources.push((
+                    string(field(image, "target")?)?.to_owned(),
+                    string(field(image, "path")?)?.to_owned(),
+                ));
+            }
+            let changed = presenter.borrow_mut().set_pictures(sources, cx);
+            if changed {
+                entity.update(cx, |state, cx| state.refresh_line_presentation(cx));
+            }
             Ok(Data::Null)
         }
         // HERDR: where the caret was last drawn, in window pixels, so a script

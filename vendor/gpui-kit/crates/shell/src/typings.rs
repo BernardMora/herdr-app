@@ -3173,6 +3173,11 @@ const BASE: &str = r#"  /** A row. */
      * to anchor a popup such as a completion list: `x`/`y` in window pixels,
      * `local_x`/`local_y` from the Editor element's top-left corner. */
     cursor_bounds(): { x: number; y: number; local_x: number; local_y: number; width: number; height: number } | null;
+    /** HERDR: the pictures a `live_preview` editor draws for lines that are
+     * only an embed (`![[shot.png]]`, `![alt](shot.png)`): `target` as the
+     * note writes it, `path` the file on this computer (png, jpg, webp, gif,
+     * svg, bmp, tiff). Replaces the previous set; unchanged files are not read again. */
+    set_images(images: { target: string; path: string }[]): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Moves the keyboard onto the editor. */
     focus(): void;

@@ -10,8 +10,107 @@ use std::ops::Range;
 
 use gpui::{Hsla, SharedString};
 use gpui_base::input::{
-    LinePresentation, LinePresenter, PresentationSpan, PresenterEdit, Rope, SpanStyle,
+    LineImage, LinePresentation, LinePresenter, PresentationSpan, PresenterEdit, Rope, SpanStyle,
 };
+
+thread_local! {
+    /// The presenter behind each live-preview editor, by the editor's entity:
+    /// how a script reaches it later to hand over pictures.
+    static PRESENTERS: std::cell::RefCell<
+        HashMap<gpui::EntityId, std::rc::Weak<std::cell::RefCell<MarkdownPresenter>>>,
+    > = std::cell::RefCell::new(HashMap::new());
+}
+
+pub(crate) fn register(
+    editor: gpui::EntityId,
+    presenter: &std::rc::Rc<std::cell::RefCell<MarkdownPresenter>>,
+) {
+    PRESENTERS.with(|all| {
+        let mut all = all.borrow_mut();
+        all.retain(|_, presenter| presenter.strong_count() > 0);
+        all.insert(editor, std::rc::Rc::downgrade(presenter));
+    });
+}
+
+pub(crate) fn presenter_of(
+    editor: gpui::EntityId,
+) -> Option<std::rc::Rc<std::cell::RefCell<MarkdownPresenter>>> {
+    PRESENTERS.with(|all| all.borrow().get(&editor).and_then(std::rc::Weak::upgrade))
+}
+
+/// A picture a note embeds, read from disk once and kept until its file changes.
+struct Picture {
+    path: String,
+    modified: Option<std::time::SystemTime>,
+    image: std::sync::Arc<gpui::RenderImage>,
+    size: gpui::Size<gpui::Pixels>,
+}
+
+fn read_picture(path: &str, cx: &gpui::App) -> Option<Picture> {
+    let format = match std::path::Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => gpui::ImageFormat::Png,
+        "jpg" | "jpeg" => gpui::ImageFormat::Jpeg,
+        "webp" => gpui::ImageFormat::Webp,
+        "gif" => gpui::ImageFormat::Gif,
+        "svg" => gpui::ImageFormat::Svg,
+        "bmp" => gpui::ImageFormat::Bmp,
+        "tif" | "tiff" => gpui::ImageFormat::Tiff,
+        _ => return None,
+    };
+    let modified = std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let bytes = std::fs::read(path).ok()?;
+    // A picture that will not decode is left as its link.
+    let image = gpui::Image::from_bytes(format, bytes)
+        .to_image_data(cx.svg_renderer())
+        .ok()?;
+    let pixels = image.size(0);
+    let size = gpui::size(
+        gpui::px(i32::from(pixels.width) as f32),
+        gpui::px(i32::from(pixels.height) as f32),
+    );
+    Some(Picture {
+        path: path.to_owned(),
+        modified,
+        image,
+        size,
+    })
+}
+
+/// The picture a line is, when the line is nothing but an embed: its target
+/// as written and the width it asks for (`![[shot.png|300]]`).
+fn picture_line(line: &str) -> Option<(&str, Option<f32>)> {
+    let trimmed = line.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("![[")
+        .and_then(|rest| rest.strip_suffix("]]"))
+    {
+        if inner.contains("]]") || inner.is_empty() {
+            return None;
+        }
+        let (target, size) = match inner.split_once('|') {
+            Some((target, size)) => (target, size.trim().parse::<f32>().ok()),
+            None => (inner, None),
+        };
+        let target = target.split('#').next().unwrap_or(target).trim();
+        return Some((target, size.filter(|width| *width >= 16.)));
+    }
+    let rest = trimmed.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let src = rest[close + 2..].strip_suffix(')')?;
+    if src.contains(')') || src.contains("](") {
+        return None;
+    }
+    let src = match src.trim_start().strip_prefix('<') {
+        Some(inner) => inner.split('>').next()?,
+        None => src.split_whitespace().next()?,
+    };
+    Some((src, None))
+}
 
 /// The colors and fonts live preview draws with.
 #[derive(Clone, Debug)]
@@ -141,6 +240,8 @@ pub(crate) struct MarkdownPresenter {
     theme: MarkdownTheme,
     blocks: Vec<Block>,
     tables: Vec<Table>,
+    /// Pictures by the target a note writes for them.
+    pictures: HashMap<String, Picture>,
 }
 
 impl MarkdownPresenter {
@@ -149,7 +250,44 @@ impl MarkdownPresenter {
             theme,
             blocks: Vec::new(),
             tables: Vec::new(),
+            pictures: HashMap::new(),
         }
+    }
+
+    /// Replace the pictures the note's embeds draw: `(target as written, file)`.
+    /// Files already read and unchanged are kept. Returns whether anything changed.
+    pub(crate) fn set_pictures(&mut self, sources: Vec<(String, String)>, cx: &gpui::App) -> bool {
+        let mut old = std::mem::take(&mut self.pictures);
+        let mut changed = old.len() != sources.len();
+        for (target, path) in sources {
+            let modified = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            let kept = old
+                .remove(&target)
+                .filter(|picture| picture.path == path && picture.modified == modified);
+            let picture = match kept {
+                Some(picture) => Some(picture),
+                None => {
+                    changed = true;
+                    read_picture(&path, cx)
+                }
+            };
+            if let Some(picture) = picture {
+                self.pictures.insert(target, picture);
+            }
+        }
+        changed
+    }
+
+    /// The picture drawn for a line that is only an embed.
+    fn picture(&self, line: &str, below_text: bool) -> Option<LineImage> {
+        let (target, width) = picture_line(line)?;
+        let picture = self.pictures.get(target)?;
+        Some(LineImage {
+            image: picture.image.clone(),
+            size: picture.size,
+            max_width: width.map(gpui::px),
+            below_text,
+        })
     }
 
     fn table_at(&self, row: usize) -> Option<&Table> {
@@ -355,7 +493,13 @@ impl LinePresenter for MarkdownPresenter {
     fn sync(&mut self, text: &Rope, edit: Option<PresenterEdit>) -> Vec<usize> {
         let source = text.to_string();
         let old = std::mem::replace(&mut self.blocks, scan_blocks(&source));
-        self.scan_tables(&source);
+        // Tables are an extra: a table this cannot measure stays plain source.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.scan_tables(&source)))
+            .is_err()
+        {
+            self.tables.clear();
+            self.blocks = scan_blocks(&source);
+        }
         let Some(edit) = edit else {
             return Vec::new();
         };
@@ -372,6 +516,22 @@ impl LinePresenter for MarkdownPresenter {
     }
 
     fn line(
+        &self,
+        row: usize,
+        line: &str,
+        reveal: Option<Range<usize>>,
+    ) -> Option<LinePresentation> {
+        // A line this parser cannot read is drawn as plain text, never a crash:
+        // the editor asks about every line the person types.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.present(row, line, reveal)
+        }))
+        .unwrap_or(None)
+    }
+}
+
+impl MarkdownPresenter {
+    fn present(
         &self,
         row: usize,
         line: &str,
@@ -419,6 +579,20 @@ impl LinePresenter for MarkdownPresenter {
                 }
             }),
             Block::Normal => {
+                // A line that is only a picture draws it: in place of its source,
+                // or under it while the caret is on the line.
+                if let Some(image) = self.picture(line, reveal.is_some()) {
+                    let mut presentation = if reveal.is_some() {
+                        Parser { theme, reveal }.line(line)
+                    } else {
+                        LinePresentation {
+                            spans: vec![PresentationSpan::hidden(0..line.len())],
+                            ..Default::default()
+                        }
+                    };
+                    presentation.image = Some(image);
+                    return Some(presentation);
+                }
                 let presentation = Parser { theme, reveal }.line(line);
                 (presentation.changes_layout() || presentation.has_decor()).then_some(presentation)
             }
@@ -648,6 +822,12 @@ impl Parser<'_> {
         let prev_char = |at: usize| line[..at].chars().next_back();
         while i < end {
             let b = bytes[i];
+            // Every construct starts with an ASCII byte; anything else is text
+            // (and may be the middle of a character, which must not be sliced).
+            if !b.is_ascii() || !line.is_char_boundary(i) {
+                i += 1;
+                continue;
+            }
             let rest = &line[i..end];
             let mut consumed: Option<usize> = None;
             match b {
@@ -1149,6 +1329,47 @@ mod tests {
         // The header and rule rows above the edit are padded to the new width.
         assert_eq!(changed, vec![0, 1]);
         assert_eq!(presenter.tables[0].widths, vec![4, 1]);
+    }
+
+    #[test]
+    fn text_in_any_script_is_read_without_slicing_characters() {
+        for text in [
+            "Texto después de la imagen.",
+            "ñandú **así** y *café* con [[Año nuevo|año]] #título",
+            "日本語の**太字**と`コード`と[リンク](https://例.jp)",
+            "- [ ] tarea ñ",
+            "> cita – con — rayas",
+            "| País | Ñ |\n| --- | --- |\n| México | sí |",
+            "emoji 👩‍💻 **x** \\é ==ü==",
+            "# Título — con ~~tachón~~",
+        ] {
+            let presenter = presenter(text);
+            for (row, line) in text.split('\n').enumerate() {
+                for reveal in [None, Some(0..0), Some(line.len()..line.len())] {
+                    if let Some(presentation) = presenter.present(row, line, reveal) {
+                        for span in &presentation.spans {
+                            assert!(line.is_char_boundary(span.range.start), "{line}: {span:?}");
+                            assert!(line.is_char_boundary(span.range.end), "{line}: {span:?}");
+                        }
+                        presentation.visible_text(line, 0..line.len(), &gpui::font("Test"));
+                    }
+                }
+            }
+        }
+        assert_eq!(shown("ñandú **así** y *café*", 0, None), "ñandú así y café");
+    }
+
+    #[test]
+    fn a_line_that_is_only_an_embed_names_its_picture() {
+        assert_eq!(picture_line("![[shot.png]]"), Some(("shot.png", None)));
+        assert_eq!(picture_line("  ![[img/a b.png|300]] "), Some(("img/a b.png", Some(300.))));
+        assert_eq!(picture_line("![[shot.png|caption]]"), Some(("shot.png", None)));
+        assert_eq!(picture_line("![alt text](pics/x.jpg \"title\")"), Some(("pics/x.jpg", None)));
+        assert_eq!(picture_line("![a](<with space.png>)"), Some(("with space.png", None)));
+        assert_eq!(picture_line("text ![[shot.png]]"), None);
+        assert_eq!(picture_line("![[a.png]] and ![[b.png]]"), None);
+        assert_eq!(picture_line("![a](x.png) more"), None);
+        assert_eq!(picture_line("[[note]]"), None);
     }
 
     #[test]
