@@ -3198,6 +3198,17 @@ const BASE: &str = r#"  /** A row. */
        * delimiters are punctuation.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */
       syntax?: Record<string, string>;
+      /** HERDR: read the text as Markdown and draw it formatted in place:
+       * markers (`**`, `#`, link URLs) hide until the caret touches their
+       * element, headings are larger, bullets and checkboxes are glyphs, code
+       * and quotes get their own look. The text is never changed. `language`
+       * is ignored. Colors come from `syntax`: heading, punctuation (shown
+       * markers), link, code, code.background, quote, quote.bar, tag,
+       * tag.background, highlight, rule, muted, checkbox. Give the editor a
+       * line height of about 1.75 so large headings fit their row. */
+      live_preview?: boolean;
+      /** HERDR: the font live preview draws code in; the theme's mono font when unset. */
+      code_font_family?: string;
     }) => EditorState;
   };
   export const Editor: { new: (state: EditorState) => NativeElement };
