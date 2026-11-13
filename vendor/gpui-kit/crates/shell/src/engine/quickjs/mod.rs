@@ -4119,8 +4119,8 @@ impl ShellRuntime {
         let result = self.with_js(|ctx| {
             let handler = entry.value.clone().restore(ctx)?;
             let payload = Object::new(ctx.clone())?;
-            payload.set("width", f32::from(size.width))?;
-            payload.set("height", f32::from(size.height))?;
+            payload.set("width", crate::value::unscaled(size.width))?;
+            payload.set("height", crate::value::unscaled(size.height))?;
             handler.call::<_, ()>((payload, context_object(ctx, ContextBinding::Call(generation))?))
         });
         if let Err(error) = result {
@@ -4175,8 +4175,8 @@ impl ShellRuntime {
             position.set("y", f32::from(event.position.y))?;
             payload.set("position", position)?;
             let local_position = Object::new(ctx.clone())?;
-            local_position.set("x", f32::from(local.x))?;
-            local_position.set("y", f32::from(local.y))?;
+            local_position.set("x", crate::value::unscaled(local.x))?;
+            local_position.set("y", crate::value::unscaled(local.y))?;
             payload.set("local_position", local_position)?;
             let event_bounds = Object::new(ctx.clone())?;
             event_bounds.set("x", f32::from(bounds.origin.x))?;
@@ -4291,8 +4291,8 @@ impl ShellRuntime {
         self.dispatch_simple_event(id, "scroll wheel", window, cx, move |ctx| {
             let payload = Object::new(ctx.clone())?;
             let delta = Object::new(ctx.clone())?;
-            delta.set("x", f32::from(pixels.x))?;
-            delta.set("y", f32::from(pixels.y))?;
+            delta.set("x", crate::value::unscaled(pixels.x))?;
+            delta.set("y", crate::value::unscaled(pixels.y))?;
             payload.set("delta", delta)?;
             match lines {
                 Some(lines) => {
@@ -4304,6 +4304,37 @@ impl ShellRuntime {
                 None => payload.set("delta_lines", rquickjs::Undefined)?,
             }
             payload.set("touch_phase", touch_phase)?;
+            set_pointer_geometry(ctx, &payload, position, bounds)?;
+            payload.set("modifiers", modifiers_object(ctx, modifiers)?)?;
+            Ok(payload)
+        });
+    }
+
+    /// Delivers one trackpad pinch to a script handler. `delta` is the change
+    /// in the gesture's scale since the last event (0.1: 10% more of the scale
+    /// it started at); a handler that adds them up from `started` gets the
+    /// gesture's whole scale, as browsers zoom.
+    pub(crate) fn dispatch_pinch(
+        self: &Rc<Self>,
+        id: CallbackId,
+        event: &gpui::PinchEvent,
+        bounds: Option<gpui::Bounds<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let position = event.position;
+        let modifiers = event.modifiers;
+        let delta = event.delta;
+        let phase = match event.phase {
+            gpui::TouchPhase::Started => "started",
+            gpui::TouchPhase::Moved => "moved",
+            gpui::TouchPhase::Ended => "ended",
+            gpui::TouchPhase::Cancelled => "cancelled",
+        };
+        self.dispatch_simple_event(id, "pinch", window, cx, move |ctx| {
+            let payload = Object::new(ctx.clone())?;
+            payload.set("delta", delta)?;
+            payload.set("phase", phase)?;
             set_pointer_geometry(ctx, &payload, position, bounds)?;
             payload.set("modifiers", modifiers_object(ctx, modifiers)?)?;
             Ok(payload)
@@ -7266,6 +7297,7 @@ impl ShellRuntime {
                 "on_mouse_down_out",
                 "on_drop",
                 "on_scroll_wheel",
+                "on_pinch",
                 "on_action",
                 "key_context",
                 "aria_level",
@@ -8268,6 +8300,7 @@ impl ShellRuntime {
             | "on_mouse_down_out"
             | "on_drop"
             | "on_scroll_wheel"
+            | "on_pinch"
             | "tab_bar"
             | "empty_group"
             | "drop_indicator"
@@ -9724,8 +9757,8 @@ fn set_pointer_geometry<'js>(
         Some(bounds) => {
             let local = position - bounds.origin;
             let local_position = Object::new(ctx.clone())?;
-            local_position.set("x", f32::from(local.x))?;
-            local_position.set("y", f32::from(local.y))?;
+            local_position.set("x", crate::value::unscaled(local.x))?;
+            local_position.set("y", crate::value::unscaled(local.y))?;
             payload.set("local_position", local_position)?;
             let event_bounds = Object::new(ctx.clone())?;
             event_bounds.set("x", f32::from(bounds.origin.x))?;
@@ -10256,6 +10289,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_mouse_down_out" => "on_mouse_down_out",
         "on_drop" => "on_drop",
         "on_scroll_wheel" => "on_scroll_wheel",
+        "on_pinch" => "on_pinch",
         "on_item_click" => "on_item_click",
         "on_item_secondary_click" => "on_item_secondary_click",
         "on_resize" => "on_resize",

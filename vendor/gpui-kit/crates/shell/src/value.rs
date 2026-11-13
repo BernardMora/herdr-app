@@ -18,6 +18,12 @@ pub fn set_pixel_scale(scale: f32) {
     PIXEL_SCALE.store(scale.to_bits(), Ordering::Relaxed);
 }
 
+/// HERDR fork: a length measured on screen, in the script's own (unzoomed) pixels, so what a
+/// script is told (its size, where the pointer is in it) matches the lengths it writes.
+pub(crate) fn unscaled(value: Pixels) -> f32 {
+    f32::from(value) / f32::from_bits(PIXEL_SCALE.load(Ordering::Relaxed))
+}
+
 pub(crate) fn scaled_px(value: f32) -> Pixels {
     px(value * f32::from_bits(PIXEL_SCALE.load(Ordering::Relaxed)))
 }
